@@ -11,9 +11,15 @@ Requires:
     - data/processed/customer_segments.csv  (from ml/rfm_segmentation.py)
     - data/processed/forecast.csv       (from ml/forecast.py)
     - GROQ_API_KEY set in the environment (see .env.example) for Page 3 — free at console.groq.com
+
+On a fresh deploy (e.g. Streamlit Community Cloud cloning this repo), none of
+the generated data files above exist yet — they're gitignored on purpose so
+the repo stays small and the real dataset never needs to touch git. This file
+auto-builds them once, on first load, via bootstrap_data() below.
 """
 
 import os
+import subprocess
 import sqlite3
 from pathlib import Path
 
@@ -21,7 +27,8 @@ import pandas as pd
 import streamlit as st
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 from ai.ask_data import ask_question  # noqa: E402
 
 DB_PATH = "data/processed/retail.db"
@@ -29,6 +36,67 @@ SEGMENTS_PATH = "data/processed/customer_segments.csv"
 FORECAST_PATH = "data/processed/forecast.csv"
 
 st.set_page_config(page_title="Retail Sales Intelligence", layout="wide")
+
+
+@st.cache_resource
+def bootstrap_data():
+    """
+    Runs once per deployed instance. If the SQLite warehouse doesn't exist yet,
+    regenerates the whole data/ML pipeline from scratch:
+      1. synthetic sample CSV (skipped if a real one is already present)
+      2. clean + load into SQLite
+      3. RFM segmentation
+      4. forecast (best-effort — skipped without error if prophet isn't installed
+         or fails, so the rest of the app still works)
+    Returns a short status string for display/debugging.
+    """
+    db_path = ROOT / DB_PATH
+    if db_path.exists():
+        return "Data already present."
+
+    raw_csv = ROOT / "data/raw/online_retail_II.csv"
+    log = []
+
+    if not raw_csv.exists():
+        log.append("No raw CSV found — generating synthetic sample data...")
+        r = subprocess.run([sys.executable, "data/generate_synthetic_data.py"],
+                            cwd=str(ROOT), capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"generate_synthetic_data.py failed:\n{r.stderr}")
+
+    log.append("Building SQLite warehouse...")
+    r = subprocess.run([sys.executable, "sql/load_and_clean.py"],
+                        cwd=str(ROOT), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"load_and_clean.py failed:\n{r.stderr}")
+
+    log.append("Running RFM segmentation...")
+    r = subprocess.run([sys.executable, "ml/rfm_segmentation.py"],
+                        cwd=str(ROOT), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rfm_segmentation.py failed:\n{r.stderr}")
+
+    log.append("Running forecast (best-effort)...")
+    r = subprocess.run([sys.executable, "ml/forecast.py"],
+                        cwd=str(ROOT), capture_output=True, text=True)
+    if r.returncode != 0:
+        # Non-fatal: e.g. prophet failed to install on this platform.
+        # The Dashboard page already handles a missing forecast.csv gracefully.
+        log.append(f"(forecast skipped: {r.stderr.strip()[-300:]})")
+
+    return "\n".join(log)
+
+
+with st.spinner("First run on this deployment — building the data pipeline (only happens once)..."):
+    try:
+        _bootstrap_status = bootstrap_data()
+    except Exception as e:
+        st.error(
+            "The data pipeline failed to build automatically on this deployment.\n\n"
+            f"**Error:** {e}\n\n"
+            "Check the app's build/runtime logs (Manage app → logs) for the full traceback."
+        )
+        st.stop()
 
 
 @st.cache_data
@@ -190,4 +258,6 @@ PAGES = {
 
 st.sidebar.title("Retail Sales Intelligence")
 choice = st.sidebar.radio("Navigate", list(PAGES.keys()))
+with st.sidebar.expander("Data pipeline status", expanded=False):
+    st.caption(_bootstrap_status)
 PAGES[choice]()
