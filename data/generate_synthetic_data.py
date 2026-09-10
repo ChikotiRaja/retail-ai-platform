@@ -116,7 +116,7 @@ def generate():
 
 if __name__ == "__main__":
     df = generate()
-        out_path = "data/raw/online_retail_II.csv"
+    out_path = "data/raw/online_retail_II.csv"
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     print(f"Wrote {len(df):,} rows to {out_path}")
